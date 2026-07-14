@@ -1,0 +1,41 @@
+name: Update tide data
+
+# Runs every Monday at 02:00 UTC, and can also be triggered manually
+# from the "Actions" tab on GitHub if you want to check right now.
+"on":
+  schedule:
+    - cron: "0 2 * * 1"
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  update-tides:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r scripts/requirements.txt
+
+      - name: Run update script
+        run: python3 scripts/update_tides.py
+
+      - name: Commit changes if data updated
+        run: |
+          git config user.name "tide-bot"
+          git config user.email "tide-bot@users.noreply.github.com"
+          if ! git diff --quiet -- tides-data.json; then
+            git add tides-data.json
+            git commit -m "Auto-update tide data ($(date -u +%Y-%m-%d))"
+            git push
+          else
+            echo "No changes to tides-data.json, nothing to commit."
+          fi
