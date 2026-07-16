@@ -14,7 +14,7 @@ Run automatically via the GitHub Actions workflow in .github/workflows/update-ti
 import re
 import json
 import sys
-from datetime import date
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 import requests
@@ -41,7 +41,6 @@ def fetch_listing():
     resp = requests.get(LISTING_URL, timeout=30, headers={"User-Agent": "Mozilla/5.0"})
     resp.raise_for_status()
     html = resp.text
-    # Links look like: <a href="...pdf">BALI TIDE CHART SEPTEMBER 2026</a>
     pattern = re.compile(
         r'href="([^"]+\.pdf)"[^>]*>\s*BALI TIDE CHART\s+([A-Z]+)\s+(\d{4})',
         re.IGNORECASE,
@@ -97,32 +96,38 @@ def month_key(year, month):
 def main():
     data = {}
     if DATA_FILE.exists():
-        data = json.loads(DATA_FILE.read_text())
+        raw = json.loads(DATA_FILE.read_text())
+        data = raw.get("months", raw) if isinstance(raw, dict) and "months" in raw else raw
 
     today = date.today()
     current_key = month_key(today.year, today.month)
+    had_error = False
 
-    # 1. Drop months that have fully passed (keep current month onward)
     before = set(data.keys())
     data = {k: v for k, v in data.items() if k >= current_key}
     removed = before - set(data.keys())
     if removed:
         print(f"Removed past months: {sorted(removed)}")
 
-    # 2. Check what's published and add anything new
     try:
         listing = fetch_listing()
     except Exception as e:
-        print(f"Could not fetch listing page: {e}", file=sys.stderr)
+        print(f"ERROR: could not fetch listing page: {e}", file=sys.stderr)
         listing = []
+        had_error = True
+
+    if not listing:
+        print("WARNING: listing page returned zero tide-chart links. "
+              "The site's layout may have changed.", file=sys.stderr)
+        had_error = True
 
     added = []
     for year, month, url in listing:
         key = month_key(year, month)
         if key < current_key:
-            continue  # don't bother re-adding old months
+            continue
         if key in data:
-            continue  # already have it
+            continue
         try:
             print(f"Fetching new month {key} from {url} ...")
             parsed = download_and_parse(url)
@@ -130,20 +135,25 @@ def main():
                 data[key] = parsed
                 added.append(key)
             else:
-                print(f"  WARNING: parsed 0 days for {key}, skipping")
+                print(f"  WARNING: parsed 0 days for {key}, skipping", file=sys.stderr)
+                had_error = True
         except Exception as e:
             print(f"  ERROR fetching/parsing {key}: {e}", file=sys.stderr)
+            had_error = True
 
     if added:
         print(f"Added new months: {sorted(added)}")
     else:
         print("No new months to add.")
 
-    DATA_FILE.write_text(json.dumps(data, separators=(",", ":"), sort_keys=True))
+    generated_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    output = {"generatedAt": generated_at, "months": data}
+    DATA_FILE.write_text(json.dumps(output, separators=(",", ":"), sort_keys=True))
     print(f"tides-data.json now covers: {sorted(data.keys())}")
 
-    # Exit code 0 always -- the workflow decides whether to commit based on git diff,
-    # not based on this script's exit code.
+    if had_error:
+        print("\nFinished WITH errors/warnings -- see above.", file=sys.stderr)
+        sys.exit(1)
 
 
 if __name__ == "__main__":
